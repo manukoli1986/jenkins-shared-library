@@ -1,3 +1,5 @@
-  def mvn(args) {
-    steps.sh "${steps.tool 'Maven'}/bin/mvn -o ${args}"
+  def mvn {
+        withMaven(maven: 'maven') {
+            sh "mvn clean verify -DSkiptest=True"
+        }
   }
