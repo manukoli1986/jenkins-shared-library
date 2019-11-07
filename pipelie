@@ -1,0 +1,138 @@
+    env.giturl = 'ssh://git@code.:7999/amfe/monitoring.git'
+    env.NODE1 = "10.14.192.27"
+    env.NODE2 = "10.14.192.28"
+    env.NODE3 = "10.56.107.92"
+    env.NODE4 = "10.56.107.93"
+
+node ('master')
+{	
+	stage ('Build') {
+    timeout(time: 5, unit: 'MINUTES')
+        {
+	    def branch = input id: 'branch',
+            message: 'Please select branch',
+            ok: 'Okay',
+            parameters: 
+	        [  
+	    	    [
+            $class: 'ChoiceParameterDefinition', choices: 'master\ntesting', 
+            name: 'Take your pick',
+            description: 'A select  option'
+          	    ]  
+	        ] 
+            git branch: "${branch}", url: "${env.giturl}"
+            def pom = readMavenPom file: 'pom.xml'
+	   
+	    	sh '''cd $WORKSPACE
+	    	mvn clean -U -X -o install -DskipTests=true '''          
+        } }
+
+	stage ('Publish to artifactory') {
+	    withCredentials([usernameColonPassword(credentialsId: 'nexuscred', variable: 'nexuscred')]) {
+            def pom = readMavenPom file: 'pom.xml'
+            sh """cd target/
+    		curl -v -u "$nexuscred" --upload-file ${pom.artifactId}-${pom.version}.jar http://10.14.192.96:8081/repository/maven-releases/com/bank/${pom.artifactId}/${pom.version}/${pom.artifactId}-${pom.version}.jar"""
+		} 
+	}
+
+	stage ('Test') {}
+	
+	stage ('Deploy On Node1') {
+        timeout(time: 5, unit: 'MINUTES')
+        try{
+        withCredentials([usernameColonPassword(credentialsId: 'nexuscred', variable: 'nexuscred')]) {
+            def pom = readMavenPom file: 'pom.xml'
+            def artifactURL = """http://10.14.192.96:8081/repository/maven-releases/com/assk/${pom.artifactId}/${pom.version}/${pom.artifactId}-${pom.version}.jar"""
+            def IP = input(
+            message: 'Do you want to proceed ?',
+            ok: 'Okay',
+            parameters:
+            [
+                [
+            $class: 'ChoiceParameterDefinition', choices: 'Yes\nNo',
+            name: '',
+                ]
+            ])
+            sh """ssh -t -t volt@${env.NODE1} -o StrictHostKeyChecking=no << EOF
+            cd /home/volt
+            curl -O -u "$nexuscred" ${artifactURL}
+            sh ./launcher.sh ${pom.artifactId}-${pom.version}.jar /dev/null  2>&1
+            timeout 20s tailf nohup.out
+            exit 0
+            EOF"""   
+        }            
+		     currentBuild.result = 'SUCCESS'           
+        } catch (Exception err) {
+             currentBuild.result = 'FAILURE'
+             echo "As deployment is already done on ${env.NODE1}"
+        }
+    }
+
+	stage ('Deploy On Node2') {
+        timeout(time: 5, unit: 'MINUTES')
+        try{
+        withCredentials([usernameColonPassword(credentialsId: 'nexuscred', variable: 'nexuscred')]) {
+            def pom = readMavenPom file: 'pom.xml'
+            def artifactURL = """http://10.10.10.96:8081/repository/maven-releases/com/examplebank/${pom.artifactId}/${pom.version}/${pom.artifactId}-${pom.version}.jar"""
+            def IP = input(
+            message: 'Do you want to proceed ?',
+            ok: 'Okay',
+            parameters:
+            [
+                [
+            $class: 'ChoiceParameterDefinition', choices: 'Yes\nNo',
+            name: '',
+                ]
+            ])
+            sh """
+			ssh -q -t root@$IP << EOF
+			[ -d /tmp/shopKeeperInsurance ] || mkdir /tmp/shopKeeperInsurance/
+			rm -rf /tmp/shopKeeperInsurance/*
+			EOF
+			ssh -t -t volt@${env.NODE2} -o StrictHostKeyChecking=no << EOF
+            cd /home/volt
+            curl -O -u "$nexuscred" ${artifactURL}
+            sh ./launcher.sh ${pom.artifactId}-${pom.version}.jar /dev/null  2>&1
+            timeout 20s tailf nohup.out
+            exit 0
+            EOF"""   
+        }            
+		     currentBuild.result = 'SUCCESS'           
+        } catch (Exception err) {
+             currentBuild.result = 'FAILURE'
+             echo "As deployment is already done on ${env.NODE2}"
+        }
+    }
+		
+	stage ('Deploy On DR Nodes'){
+        withCredentials([usernameColonPassword(credentialsId: 'nexuscred', variable: 'nexuscred')]) {
+        def pom = readMavenPom file: 'pom.xml'
+        def artifactURL = """http://10.10.10.96:8081/repository/maven-releases/com/examplebank/${pom.artifactId}/${pom.version}/${pom.artifactId}-${pom.version}.jar"""
+        def IP = input(
+            message: 'Do you want to proceed ?',
+            ok: 'Okay',
+            parameters:
+            [
+            [
+                [
+            $class: 'ChoiceParameterDefinition', choices: 'Yes\nNo',
+            name: '',
+                ]
+            ])
+        parallel(
+            node1: {
+            sh """ssh -t -t volt@${env.NODE3} -o StrictHostKeyChecking=no << EOF
+            curl -O -u "$nexuscred" ${artifactURL}
+            exit 0
+            EOF""" 
+                    },
+            node2: {
+            sh """ssh -t -t volt@${env.NODE4} -o StrictHostKeyChecking=no << EOF
+            curl -O -u "$nexuscred" ${artifactURL}
+            exit 0
+            EOF""" 
+                    }
+                )
+        }   
+	}
+}
